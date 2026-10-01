@@ -828,7 +828,18 @@ async function discoverSchedulePoints(force = false) {
 // came back empty — the points were never missing, just outside the scanned tree. So unlike
 // LightSch_n (discovered by name), Valve/ValveSch points are resolved directly, no discovery.
 const IRRIGATION_NAME_RE = /^(ValveSch|VALVE)_(\d{1,2})$/
+// SAFETY (2026-10-01, on-site): the hardcoded folder names below
+// (Irrigation_Valves$201$2d8 / $209$2d10) are NOT in the confirmed SLOT_PATHS map
+// and were never validated by a successful listPoints()/read. On site they return
+// 401 for every ValveSch_n / VALVE_n read, and because authedRequest retries a 401
+// by clearing the SHARED token cache, each bad read also briefly disturbs the
+// working CO2/greenhouse reads. Until Aina confirms the real slot ORD in Workbench,
+// treat these paths as unconfirmed: return null so getSchedulePointPath reports
+// "not confirmed / not allocated" (handled gracefully by the UI) instead of hammering
+// the JACE. Flip IRRIGATION_PATHS_CONFIRMED to true once the ORD is verified.
+const IRRIGATION_PATHS_CONFIRMED = false
 function irrigationSlotPath(name) {
+    if (!IRRIGATION_PATHS_CONFIRMED) return null
     const m = IRRIGATION_NAME_RE.exec(String(name))
     if (!m) return null
     const [, prefix, nStr] = m
@@ -868,7 +879,11 @@ async function strictReadSlot(slotPath, label) {
         logApiCall('READ STRICT', label, slotPath)
         // Tested on-site 2026-09-30: PUT on readPoint returns 401 "No matching authorisation
         // token was found" — fails before it even reaches point lookup. GET is what actually works.
-        const res  = await authedRequest(url, { method: 'GET' }, API_TIMEOUT)
+        // retryOnUnauthorized=false (2026-10-01): a scheduler point that 401s (e.g. an
+        // unconfirmed/unresolved slot path) must NOT trigger authedRequest's retry branch,
+        // which clears the SHARED token cache and would disturb the working CO2/greenhouse
+        // reads. A scheduler 401 is surfaced as a normal error instead.
+        const res  = await authedRequest(url, { method: 'GET' }, API_TIMEOUT, false)
         const body = await readResponseBody(res)
         if (!res.ok) return { ok: false, status: res.status, slotPath, raw: body, error: `Unable to read ${label}. ${describeHttpError(res.status, body)}` }
         const value = extractValue(body)
